@@ -29,7 +29,7 @@ jobs:
           HOMEBREW_REPOSITORY="$HOMEBREW_PREFIX/Homebrew"
           sudo mkdir -p "$HOMEBREW_REPOSITORY/Library/Taps"
           git -C "$HOMEBREW_REPOSITORY" init
-          git -C "$HOMEBREW_REPOSITORY" remote add origin "https://github.com/$GITHUB_REPOSITORY"
+          git -C "$HOMEBREW_REPOSITORY" remote add origin "https://github.com/Homebrew/brew"
 
           cd "$HOMEBREW_PREFIX"
           sudo mkdir -p bin etc include lib opt sbin share var/homebrew/linked Cellar
@@ -57,6 +57,19 @@ jobs:
 
     - name: Run brew config
       run: brew config
+    
+    - name: Run brew doctor
+      run: |
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          # Cleanup some Linux `brew doctor` failures
+          sudo rm -rf /usr/local/include/node/
+        else
+          # Allow Xcode to be outdated
+          export HOMEBREW_GITHUB_ACTIONS=1
+          # Link old gettext (otherwise `brew doctor` is sad)
+          brew link gettext
+        fi
+        brew doctor
 
     - name: Install Bundler RubyGems
       run: |
