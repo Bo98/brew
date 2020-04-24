@@ -1,14 +1,12 @@
 name: GitHub Actions CI
 on:
-  push:
-    branches: master
+  push: []
   pull_request: []
   release:
     types:
       - published
 jobs:
   tests:
-    if: github.repository == 'Homebrew/brew'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -126,7 +124,6 @@ jobs:
         # set variables for coverage reporting
         HOMEBREW_GITHUB_ACTIONS: 1
         HOMEBREW_CI_NAME: github-actions
-        HOMEBREW_COVERALLS_REPO_TOKEN: 3F6U6ZqctoNJwKyREremsqMgpU3qYgxFk
 
         # These cannot be queried at the macOS level on GitHub Actions.
         HOMEBREW_LANGUAGES: en-GB
@@ -169,18 +166,3 @@ jobs:
         else
           brew test-bot
         fi
-
-    - name: Deploy the latest Docker image
-      if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/master'
-      run: |
-        docker login docker.pkg.github.com -u BrewTestBot -p ${{secrets.GITHUB_TOKEN}}
-        docker tag brew docker.pkg.github.com/homebrew/brew/brew
-        docker push docker.pkg.github.com/homebrew/brew/brew
-
-    - name: Deploy the tagged Docker image
-      if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/')
-      run: |
-        docker login docker.pkg.github.com -u BrewTestBot -p ${{secrets.GITHUB_TOKEN}}
-        v=${GITHUB_REF:10}
-        docker tag brew "docker.pkg.github.com/homebrew/brew/brew:$v"
-        docker push "docker.pkg.github.com/homebrew/brew/brew:$v"
