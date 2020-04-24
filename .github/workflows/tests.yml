@@ -24,9 +24,11 @@ jobs:
       run: |
         if which brew &>/dev/null; then
           HOMEBREW_REPOSITORY="$(brew --repo)"
+          export HOMEBREW_TESTZZ=1
         else
           HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew
           HOMEBREW_REPOSITORY="$HOMEBREW_PREFIX/Homebrew"
+          export HOMEBREW_TESTZZ=1
           sudo mkdir -p "$HOMEBREW_REPOSITORY/Library/Taps"
           git -C "$HOMEBREW_REPOSITORY" init
           git -C "$HOMEBREW_REPOSITORY" remote add origin "https://github.com/Homebrew/brew"
@@ -37,6 +39,7 @@ jobs:
           cd -
         fi
 
+        echo $HOMEBREW_TESTZZ
         cd "$HOMEBREW_REPOSITORY"
         rm -rf "$GITHUB_WORKSPACE"
         ln -s "$HOMEBREW_REPOSITORY" "$GITHUB_WORKSPACE"
@@ -87,6 +90,8 @@ jobs:
       run: |
         # Install taps needed for 'brew tests' and 'brew man'
         export HOMEBREW_NO_AUTO_UPDATE=1
+        echo $HOMEBREW_TESTZZ
+        echo "$HOMEBREW_REPOSITORY"
         brew tap homebrew/bundle
         brew tap homebrew/services
         if [ "$RUNNER_OS" = "macOS" ]; then
