@@ -368,14 +368,13 @@ class Pathname
     end
   end
 
+  def write_java_env_script(target, java_version: nil)
+    write_env_script target, Language::Java.overridable_java_home_env(java_version)
+  end
+
   # Writes an exec script that invokes a Java jar
   def write_jar_script(target_jar, script_name, java_opts = "", java_version: nil)
-    mkpath
-    java_home = ("JAVA_HOME=\"#{Language::Java.java_home_shell(java_version)}\" " if java_version)
-    join(script_name).write <<~SH
-      #!/bin/bash
-      #{java_home}exec java #{java_opts} -jar #{target_jar} "$@"
-    SH
+    (self/script_name).write_java_env_script "java #{java_opts} -jar #{target_jar}", java_version: java_version
   end
 
   def install_metafiles(from = Pathname.pwd)
