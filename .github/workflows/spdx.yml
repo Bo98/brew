@@ -1,0 +1,39 @@
+name: Update license data
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+
+jobs:
+  spdx:
+    runs-on: ubuntu-latest
+    env:
+      HOMEBREW_NO_ANALYTICS: 1
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      
+      - name: Configure Git
+        uses: Homebrew/actions/git-user-config@master
+      
+      - name: Setup Homebrew
+        run: |
+          HOMEBREW_REPOSITORY="$HOMEBREW_PREFIX/Homebrew"
+
+          rm -rf "$HOMEBREW_REPOSITORY"
+          ln -s "$GITHUB_WORKSPACE" "$HOMEBREW_REPOSITORY"
+      
+      - name: Update license data
+        run: |
+          cd "$GITHUB_WORKSPACE/Library/Homebrew"
+          if ! brew update-license-data --fail-if-changed; then            
+            SPDX_VERSION=$(jq -er .licenseListVersion data/spdx.json)
+            if git ls-remote --exit-code --heads origin "spdx-$SPDX_VERSION"; then
+              git checkout -b spdx-$SPDX_VERSION
+              git add data/spdx.json
+              git commit -m "data/spdx.json: update to $SPDX_VERSION"
+              git push origin spdx-$SPDX_VERSION
+              hub pull-request -m "data/spdx.json: update to $SPDX_VERSION"
+            fi
+          fi
