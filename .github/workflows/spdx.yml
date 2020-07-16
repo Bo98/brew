@@ -16,11 +16,12 @@ jobs:
       
       - name: Configure Git
         uses: Homebrew/actions/git-user-config@master
+        with:
+          username: BrewTestBot
       
       - name: Setup Homebrew
         run: |
-          HOMEBREW_REPOSITORY="$HOMEBREW_PREFIX/Homebrew"
-
+          HOMEBREW_REPOSITORY="$(brew --repo)"
           rm -rf "$HOMEBREW_REPOSITORY"
           ln -s "$GITHUB_WORKSPACE" "$HOMEBREW_REPOSITORY"
       
