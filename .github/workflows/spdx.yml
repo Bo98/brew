@@ -28,7 +28,8 @@ jobs:
       - name: Update license data
         run: |
           cd "$GITHUB_WORKSPACE/Library/Homebrew"
-          if ! brew update-license-data --fail-if-changed; then            
+          if ! brew update-license-data --fail-if-changed; then
+            echo "1"
             SPDX_VERSION=$(jq -er .licenseListVersion data/spdx.json)
             if git ls-remote --exit-code --heads origin "spdx-$SPDX_VERSION"; then
               git checkout -b spdx-$SPDX_VERSION
@@ -37,4 +38,7 @@ jobs:
               git push origin spdx-$SPDX_VERSION
               hub pull-request -m "data/spdx.json: update to $SPDX_VERSION"
             fi
+          else
+            echo "2"
           fi
+          jq -er .licenseListVersion data/spdx.json
