@@ -33,10 +33,10 @@ jobs:
           if ! brew update-license-data --fail-if-changed; then
             SPDX_VERSION=$(jq -er .licenseListVersion data/spdx.json)
             if ! git ls-remote --exit-code --heads origin "spdx-$SPDX_VERSION"; then
-              git checkout -b spdx-$SPDX_VERSION
+              git checkout -b "spdx-$SPDX_VERSION"
               git add data/spdx.json
               git commit -m "data/spdx.json: update to $SPDX_VERSION"
-              git push origin spdx-$SPDX_VERSION
+              git push origin "spdx-$SPDX_VERSION"
               gh pr create -t "data/spdx.json: update to $SPDX_VERSION" \
                            -b "This is an automated pull request to update the license data file."
             fi
