@@ -26,6 +26,8 @@ jobs:
           ln -s "$GITHUB_WORKSPACE" "$HOMEBREW_REPOSITORY"
       
       - name: Update license data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd "$GITHUB_WORKSPACE/Library/Homebrew"
           if ! brew update-license-data --fail-if-changed; then
