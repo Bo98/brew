@@ -11,7 +11,7 @@ require 'patchelf/helper'
 #:nodoc:
 module PatchELF
   # TODO: refactor buf_* methods here
-  # TODO: move all refinements into a seperate file / helper file.
+  # TODO: move all refinements into a separate file / helper file.
   # refinements for cleaner syntax / speed / memory optimizations
   module Refinements
     refine StringIO do
@@ -133,6 +133,8 @@ module PatchELF
       sec = find_section '.dynamic'
       return unless sec
 
+      return if sec.header.sh_type == ELFTools::Constants::SHT_NOBITS
+
       shdr = sec.header
       with_buf_at(shdr.sh_offset) do |buf|
         dyn = ELFTools::Structs::ELF_Dyn.new(elf_class: elf_class, endian: endian)
@@ -171,7 +173,7 @@ module PatchELF
     end
 
     def modify_interpreter
-      @replaced_sections['.interp'] = @set[:interpreter] + "\x00"
+      @replaced_sections['.interp'] = "#{@set[:interpreter]}\x00"
     end
 
     def modify_needed
@@ -234,14 +236,13 @@ module PatchELF
       dyn_tags = collect_runpath_tags
       resolve_rpath_tag_conflict(dyn_tags, force_rpath: force_rpath)
       # (:runpath, :rpath) order_matters.
-      resolved_rpath_dyns = dyn_tags.values_at(:runpath, :rpath).compact
+      resolved_rpath_dyn = dyn_tags.values_at(:runpath, :rpath).compact.first
 
       old_rpath = ''
       rpath_off = nil
-      resolved_rpath_dyns.each do |dyn|
-        rpath_off = shdr_dynstr.sh_offset + dyn[:header].d_val
+      if resolved_rpath_dyn
+        rpath_off = shdr_dynstr.sh_offset + resolved_rpath_dyn[:header].d_val
         old_rpath = buf_cstr(rpath_off)
-        break
       end
       return if old_rpath == new_rpath
 
@@ -293,6 +294,11 @@ module PatchELF
         dt_null_idx += 1
       end
 
+      if dyn_num_bytes.nil?
+        Logger.debug "no dynamic tags"
+        return
+      end
+
       # allot for new dt_runpath
       shdr_dynamic = find_section('.dynamic').header
       new_dynamic_data = replace_section '.dynamic', shdr_dynamic.sh_size + dyn_num_bytes
@@ -331,7 +337,19 @@ module PatchELF
     end
 
     def page_size
-      Helper::PAGE_SIZE
+      # Different architectures have different minimum section alignments.
+      case ehdr.e_machine
+      when ELFTools::Constants::EM_SPARC,
+           ELFTools::Constants::EM_MIPS,
+           ELFTools::Constants::EM_PPC,
+           ELFTools::Constants::EM_PPC64,
+           ELFTools::Constants::EM_AARCH64,
+           ELFTools::Constants::EM_TILEGX,
+           ELFTools::Constants::EM_LOONGARCH
+        0x10000
+      else
+        0x1000
+      end
     end
 
     def patch_out
@@ -359,7 +377,7 @@ module PatchELF
                  elsif data.size < size
                    data.ljust(size, "\x00")
                  else
-                   data[0...size] + "\x00"
+                   "#{data[0...size]}\x00"
                  end
       @replaced_sections[section_name] = rep_data
     end
@@ -529,11 +547,11 @@ module PatchELF
     def rewrite_sections_executable
       sort_shdrs!
       shdr = start_replacement_shdr
-      start_offset = shdr.sh_offset
-      start_addr = shdr.sh_addr
+      start_offset = shdr.sh_offset.to_i
+      start_addr = shdr.sh_addr.to_i
       first_page = start_addr - start_offset
 
-      Logger.debug "first reserved offset/addr is 0x#{start_offset.to_i.to_s 16}/0x#{start_addr.to_i.to_s 16}"
+      Logger.debug "first reserved offset/addr is 0x#{start_offset.to_s 16}/0x#{start_addr.to_s 16}"
 
       unless start_addr % page_size == start_offset % page_size
         raise PatchError, 'start_addr != start_offset (mod PAGE_SIZE)'
@@ -543,26 +561,26 @@ module PatchELF
 
       copy_shdrs_to_eof if ehdr.e_shoff < start_offset
 
+      normalize_note_segments
+
       seg_num_bytes = @segments.first.header.num_bytes
       needed_space = (
         ehdr.num_bytes +
         (@segments.count * seg_num_bytes) +
         @replaced_sections.sum { |_, str| Helper.alignup(str.size, @section_alignment) }
       )
+      Logger.debug "needed space is #{needed_space}"
 
       if needed_space > start_offset
-        needed_space += seg_num_bytes # new load segment is required
-
         needed_pages = Helper.alignup(needed_space - start_offset, page_size) / page_size
         Logger.debug "needed pages is #{needed_pages}"
         raise PatchError, 'virtual address space underrun' if needed_pages * page_size > first_page
 
+        shift_file(needed_pages, start_offset)
+
         first_page -= needed_pages * page_size
         start_offset += needed_pages * page_size
-
-        shift_file(needed_pages, first_page)
       end
-      Logger.debug "needed space is #{needed_space}"
 
       cur_off = ehdr.num_bytes + (@segments.count * seg_num_bytes)
       Logger.debug "clearing first #{start_offset - cur_off} bytes"
@@ -575,27 +593,32 @@ module PatchELF
     end
 
     def replace_sections_in_the_way_of_phdr!
-      pht_size = ehdr.num_bytes + (@segments.count + 1) * @segments.first.header.num_bytes
+      num_notes = @sections.count { |sec| sec.type == ELFTools::Constants::SHT_NOTE }
+
+      pht_size = ehdr.num_bytes + (@segments.count + num_notes + 1) * @segments.first.header.num_bytes
 
       # replace sections that may overlap with expanded program header table
       @sections.each_with_index do |sec, idx|
         shdr = sec.header
         next if idx.zero? || @replaced_sections[sec.name]
-        break if shdr.sh_addr > pht_size
+        break if shdr.sh_offset > pht_size
 
         replace_section sec.name, shdr.sh_size
       end
     end
 
-    def seg_end_addr(seg)
-      phdr = seg.header
-      Helper.alignup(phdr.p_vaddr + phdr.p_memsz, page_size)
-    end
-
     def rewrite_sections_library
-      start_page = seg_end_addr(@segments.max_by(&method(:seg_end_addr)))
+      start_page = 0
+      first_page = 0
+      @segments.each do |seg|
+        phdr = seg.header
+        this_page = Helper.alignup(phdr.p_vaddr + phdr.p_memsz, page_size)
+        start_page = [start_page, this_page].max
+        first_page = phdr.p_vaddr - phdr.p_offset if phdr.p_type == ELFTools::Constants::PT_PHDR
+      end
 
       Logger.debug "Last page is 0x#{start_page.to_s 16}"
+      Logger.debug "First page is 0x#{first_page.to_s 16}"
       replace_sections_in_the_way_of_phdr!
       needed_space = @replaced_sections.sum { |_, str| Helper.alignup(str.size, @section_alignment) }
       Logger.debug "needed space = #{needed_space}"
@@ -623,45 +646,115 @@ module PatchELF
         p_align: page_size
       )
 
+      normalize_note_segments
+
       cur_off = write_replaced_sections start_offset, start_page, start_offset
       raise PatchError, 'cur_off != start_offset + needed_space' if cur_off != start_offset + needed_space
 
-      rewrite_headers ehdr.e_phoff
+      rewrite_headers(first_page + ehdr.e_phoff)
     end
 
-    def shift_file(extra_pages, start_page)
+    def normalize_note_segments
+      return if @replaced_sections.none? do |rsec_name, _|
+        find_section(rsec_name)&.type == ELFTools::Constants::SHT_NOTE
+      end
+
+      new_phdrs = []
+
+      phdrs_by_type(ELFTools::Constants::PT_NOTE) do |phdr|
+        start_off = phdr.p_offset.to_i
+        curr_off = start_off
+        end_off = start_off + phdr.p_filesz
+
+        # Binaries produced by older patchelf versions may contain empty PT_NOTE segments.
+        next if @sections.none? { |sec| sec.header.sh_offset >= start_off && sec.header.sh_offset < end_off }
+
+        while curr_off < end_off
+          size = 0
+          @sections.each do |sec|
+            next if sec.type != ELFTools::Constants::SHT_NOTE
+
+            shdr = sec.header
+
+            aligned_curr_off = Helper.alignup(curr_off, shdr.sh_addralign)
+            next if shdr.sh_offset != aligned_curr_off
+
+            size = shdr.sh_size.to_i
+            curr_off = aligned_curr_off
+            break
+          end
+
+          raise PatchError, "cannot normalize PT_NOTE segment: non-contiguous SHT_NOTE sections" if size.zero?
+
+          if curr_off + size > end_off
+            raise PatchError, "cannot normalize PT_NOTE segment: partially mapped SHT_NOTE section"
+          end
+
+          new_phdr = ELFTools::Structs::ELF_Phdr[elf_class].new(endian: endian, **(phdr.snapshot))
+          new_phdr.p_offset = curr_off
+          new_phdr.p_vaddr = phdr.p_vaddr + (curr_off - start_off)
+          new_phdr.p_paddr = phdr.p_paddr + (curr_off - start_off)
+          new_phdr.p_filesz = size
+          new_phdr.p_memsz = size
+
+          if curr_off == start_off
+            phdr.assign(new_phdr)
+          else
+            new_phdrs << new_phdr
+          end
+
+          curr_off += size
+        end
+      end
+
+      new_phdrs.each { |phdr| add_segment!(**(phdr.snapshot)) }
+    end
+
+    def shift_file(extra_pages, start_offset)
+      raise PatchError, "start_offset(#{start_offset}) < ehdr.num_bytes" if start_offset < ehdr.num_bytes
+
       oldsz = @buffer.size
+      raise PatchError, "oldsz <= start_offset(#{start_offset})" if oldsz <= start_offset
+
       shift = extra_pages * page_size
       buf_grow!(oldsz + shift)
-      buf_move! shift, 0, oldsz
-      with_buf_at(ehdr.num_bytes) { |buf| buf.write "\x00" * (shift - ehdr.num_bytes) }
+      buf_move! start_offset + shift, start_offset, oldsz - start_offset
+      with_buf_at(start_offset) { |buf| buf.write "\x00" * shift }
 
       ehdr.e_phoff = ehdr.num_bytes
-      ehdr.e_shoff = ehdr.e_shoff + shift
+      ehdr.e_shoff = ehdr.e_shoff + shift if ehdr.e_shoff >= start_offset
 
       @sections.each_with_index do |sec, i|
         next if i.zero? # dont touch NULL section
 
         shdr = sec.header
+        next if shdr.sh_offset < start_offset
+
         shdr.sh_offset += shift
       end
 
       @segments.each do |seg|
         phdr = seg.header
-        phdr.p_offset += shift
-        phdr.p_align = page_size if phdr.p_align != 0 && (phdr.p_vaddr - phdr.p_offset) % phdr.p_align != 0
-      end
 
-      add_segment!(
-        p_type: ELFTools::Constants::PT_LOAD,
-        p_offset: 0,
-        p_vaddr: start_page,
-        p_paddr: start_page,
-        p_filesz: shift,
-        p_memsz: shift,
-        p_flags: ELFTools::Constants::PF_R | ELFTools::Constants::PF_W,
-        p_align: page_size
-      )
+        p_start = phdr.p_offset
+        p_end = p_start + phdr.p_filesz
+        shift_segment = false
+
+        if p_start <= start_offset && p_end > start_offset && phdr.p_type == ELFTools::Constants::PT_LOAD
+          phdr.p_memsz += shift
+          phdr.p_filesz += shift
+        elsif p_start >= start_offset
+          shift_segment = true
+        end
+
+        if shift_segment
+          phdr.p_offset += shift
+          phdr.p_align = page_size if phdr.p_align != 0 && (phdr.p_vaddr - p_start) % phdr.p_align != 0
+        else
+          phdr.p_paddr -= shift if phdr.p_paddr > shift
+          phdr.p_vaddr -= shift if phdr.p_vaddr > shift
+        end
+      end
     end
 
     def sort_phdrs!
@@ -699,12 +792,18 @@ module PatchELF
     end
 
     def sort_shdrs!
+      return if @sections.empty?
+
       section_dep_values = collect_section_to_section_refs
-      shstrtab_name = @sections[ehdr.e_shstrndx].name
+      shstrtab = @sections[ehdr.e_shstrndx].header
       @sections.sort! { |me, you| me.header.sh_offset.to_i <=> you.header.sh_offset.to_i }
       update_section_idx!
       restore_section_to_section_refs!(section_dep_values)
-      ehdr.e_shstrndx = find_section_idx shstrtab_name
+      @sections.each_with_index do |sec, idx|
+        if sec.header.sh_offset == shstrtab.sh_offset
+          ehdr.e_shstrndx = idx
+        end
+      end
     end
 
     # given a +dyn.d_tag+, returns the section name it must be synced to.
@@ -719,7 +818,12 @@ module PatchELF
       when ELFTools::Constants::DT_HASH
         '.hash'
       when ELFTools::Constants::DT_GNU_HASH
-        '.gnu.hash'
+        # return nil if not found, patchelf claims no problem in skipping
+        find_section('.gnu.hash')&.name
+      when ELFTools::Constants::DT_MIPS_XHASH
+        return if ehdr.e_machine != ELFTools::Constants::EM_MIPS
+
+        '.MIPS.xhash'
       when ELFTools::Constants::DT_JMPREL
         sec_name = %w[.rel.plt .rela.plt .rela.IA_64.pltoff].find { |s| find_section(s) }
         raise PatchError, 'cannot find section corresponding to DT_JMPREL' unless sec_name
@@ -743,9 +847,25 @@ module PatchELF
 
     # updates dyn tags by syncing it with @section values
     def sync_dyn_tags!
+      dyn_table_offset = nil
       each_dynamic_tags do |dyn, buf_off|
+        dyn_table_offset ||= buf_off
+
         sec_name = dyn_tag_to_section_name(dyn.d_tag)
-        next unless sec_name
+
+        unless sec_name
+          if dyn.d_tag == ELFTools::Constants::DT_MIPS_RLD_MAP_REL && ehdr.e_machine == ELFTools::Constants::EM_MIPS
+            rld_map = find_section('.rld_map')
+            dyn.d_val = if rld_map
+              rld_map.header.sh_addr.to_i - (buf_off - dyn_table_offset) - find_section('.dynamic').header.sh_addr.to_i
+            else
+              Logger.warn "DT_MIPS_RLD_MAP_REL entry is present, but .rld_map section is not"
+              0
+            end
+          end
+
+          next
+        end
 
         shdr = find_section(sec_name).header
         dyn.d_val = dyn.d_tag == ELFTools::Constants::DT_STRSZ ? shdr.sh_size.to_i : shdr.sh_addr.to_i
@@ -784,22 +904,31 @@ module PatchELF
       end
     end
 
+    # To be used when the section header does not exist.
+    def dummy_shdr
+      ELFTools::Structs::ELF_Shdr.new(endian: endian, elf_class: elf_class)
+    end
+
     def write_replaced_sections(cur_off, start_addr, start_offset)
       sht_no_bits = ELFTools::Constants::SHT_NOBITS
 
-      # the original source says this has to be done seperately to
+      # the original source says this has to be done separately to
       # prevent clobbering the previously written section contents.
       @replaced_sections.each do |rsec_name, _|
-        shdr = find_section(rsec_name).header
+        shdr = find_section(rsec_name)&.header
+        next unless shdr
+
         with_buf_at(shdr.sh_offset) { |b| b.fill('X', shdr.sh_size) } if shdr.sh_type != sht_no_bits
       end
+
+      noted_phdrs = Set.new
 
       # the sort is necessary, the strategy in ruby and Cpp to iterate map/hash
       # is different, patchelf v0.10 iterates the replaced_sections sorted by
       # keys.
       @replaced_sections.sort.each do |rsec_name, rsec_data|
-        section = find_section(rsec_name)
-        shdr = section.header
+        shdr = find_section(rsec_name)&.header
+        shdr ||= dummy_shdr
 
         Logger.debug <<~DEBUG
           rewriting section '#{rsec_name}'
@@ -809,17 +938,45 @@ module PatchELF
 
         with_buf_at(cur_off) { |b| b.write rsec_data }
 
+        orig_sh_offset = shdr.sh_offset.to_i
+        orig_sh_size = shdr.sh_size.to_i
+
         shdr.sh_offset = cur_off
         shdr.sh_addr = start_addr + (cur_off - start_offset)
         shdr.sh_size = rsec_data.size
-        shdr.sh_addralign = @section_alignment
+
+        if shdr.sh_type != ELFTools::Constants::SHT_NOTE || shdr.sh_addralign > @section_alignment
+          shdr.sh_addralign = @section_alignment
+        end
 
         seg_type = {
           '.interp' => ELFTools::Constants::PT_INTERP,
-          '.dynamic' => ELFTools::Constants::PT_DYNAMIC
-        }[section.name]
+          '.dynamic' => ELFTools::Constants::PT_DYNAMIC,
+          '.MIPS.abiflags' => ELFTools::Constants::PT_MIPS_ABIFLAGS,
+          '.note.gnu.property' => ELFTools::Constants::PT_GNU_PROPERTY
+        }[rsec_name]
 
         phdrs_by_type(seg_type) { |phdr| sync_sec_to_seg(shdr, phdr) }
+
+        if shdr.sh_type == ELFTools::Constants::SHT_NOTE
+          phdrs_by_type(ELFTools::Constants::PT_NOTE) do |phdr, idx|
+            next if noted_phdrs.include?(idx)
+
+            p_start = phdr.p_offset
+            p_end = p_start + phdr.p_filesz
+            s_start = orig_sh_offset
+            s_end = s_start + orig_sh_size
+
+            # Skip if not overlapping
+            next if (s_start < p_start || s_start >= p_end) && (s_end <= p_start || s_end > p_end)
+
+            raise PatchError, "unsupported overlap of SHT_NOTE and PT_NOTE" if p_start != s_start || p_end != s_end
+
+            sync_sec_to_seg(shdr, phdr)
+
+            noted_phdrs << idx
+          end
+        end
 
         cur_off += Helper.alignup(rsec_data.size, @section_alignment)
       end
