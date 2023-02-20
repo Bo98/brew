@@ -256,21 +256,26 @@ module Homebrew
         # Check for things we don't like to depend on.
         # We allow non-Homebrew installs whenever possible.
         spec.deps.each do |dep|
-          begin
-            dep_f = dep.to_formula
+          use_git_formulae = @core_tap ||
+                             (!Homebrew::EnvConfig.install_from_api? &&
+                              !Homebrew::EnvConfig.automatically_set_no_install_from_api?)
+
+          dep_f = with_env(HOMEBREW_NO_INSTALL_FROM_API: (use_git_formulae ? "1" : nil)) do
+            dep.to_formula
           rescue TapFormulaUnavailableError
             # Don't complain about missing cross-tap dependencies
-            next
+            nil
           rescue FormulaUnavailableError
             problem "Can't find dependency '#{dep.name.inspect}'."
-            next
+            nil
           rescue TapFormulaAmbiguityError
             problem "Ambiguous dependency '#{dep.name.inspect}'."
-            next
+            nil
           rescue TapFormulaWithOldnameAmbiguityError
             problem "Ambiguous oldname dependency '#{dep.name.inspect}'."
-            next
+            nil
           end
+          next if dep_f.nil?
 
           if dep_f.oldname && dep.name.split("/").last == dep_f.oldname
             problem "Dependency '#{dep.name}' was renamed; use new name '#{dep_f.name}'."
