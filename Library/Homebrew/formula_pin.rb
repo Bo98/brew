@@ -22,7 +22,7 @@ class FormulaPin
   end
 
   def pin
-    pin_at(@formula.installed_kegs.map(&:version).max)
+    pin_at(Keg.sort(@formula.installed_kegs).first.version)
   end
 
   def unpin
