@@ -138,8 +138,16 @@ module GitHub
     # Gets the token from the GitHub CLI for github.com.
     sig { returns(T.nilable(String)) }
     def self.github_cli_token
+      if Process.uid != Process.euid
+        origeuid = Process.euid
+        Process::Sys.seteuid(Process.uid)
+      end
+
       # Avoid `Formula["gh"].opt_bin` so this method works even with `HOMEBREW_DISABLE_LOAD_FORMULA`.
-      env = { "PATH" => PATH.new(HOMEBREW_PREFIX/"opt/gh/bin", ENV.fetch("PATH")) }
+      env = {
+        "PATH" => PATH.new(HOMEBREW_PREFIX/"opt/gh/bin", ENV.fetch("PATH")),
+        "HOME" => Etc.getpwuid(Process.uid).dir,
+      }
       gh_out, _, result = system_command "gh",
                                          args:         ["auth", "token", "--hostname", "github.com"],
                                          env:,
@@ -147,15 +155,23 @@ module GitHub
       return unless result.success?
 
       gh_out.chomp
+    ensure
+      Process::Sys.seteuid(origeuid) if origeuid
     end
 
     # Gets the password field from `git-credential-osxkeychain` for github.com,
     # but only if that password looks like a GitHub Personal Access Token.
     sig { returns(T.nilable(String)) }
     def self.keychain_username_password
+      if Process.uid != Process.euid
+        origeuid = Process.euid
+        Process::Sys.seteuid(Process.uid)
+      end
+
       git_credential_out, _, result = system_command "git",
                                                      args:         ["credential-osxkeychain", "get"],
                                                      input:        ["protocol=https\n", "host=github.com\n"],
+                                                     env:          { "HOME" => Etc.getpwuid(Process.uid).dir },
                                                      print_stderr: false
       return unless result.success?
 
@@ -169,6 +185,8 @@ module GitHub
       return unless GITHUB_PERSONAL_ACCESS_TOKEN_REGEX.match?(github_password)
 
       github_password
+    ensure
+      Process::Sys.seteuid(origeuid) if origeuid
     end
 
     def self.credentials
