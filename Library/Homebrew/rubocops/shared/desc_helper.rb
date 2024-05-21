@@ -109,6 +109,8 @@ module RuboCop
           correction.gsub!(/\s+$/, "")
           correction.gsub!(/\.$/, "")
 
+          next if correction == match_data[:correction]
+
           corrector.replace(@offensive_node.source_range, "#{quote}#{correction}#{quote}")
         end
       end
