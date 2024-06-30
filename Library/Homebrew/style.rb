@@ -149,10 +149,12 @@ module Homebrew
       end
 
       files&.map!(&:expand_path)
+      base_dir = HOMEBREW_LIBRARY
       if files.blank? || files == [HOMEBREW_REPOSITORY]
         files = [HOMEBREW_LIBRARY_PATH]
       elsif files.any? { |f| f.to_s.start_with?(HOMEBREW_REPOSITORY/"docs") || (f.basename.to_s == "docs") }
         args << "--config" << (HOMEBREW_REPOSITORY/"docs/docs_rubocop_style.yml")
+        base_dir = HOMEBREW_REPOSITORY/"docs"
       elsif files.none? { |f| f.to_s.start_with? HOMEBREW_LIBRARY_PATH }
         args << "--config" << (HOMEBREW_LIBRARY/".rubocop.yml")
       end
@@ -174,14 +176,17 @@ module Homebrew
 
         args << "--color" if Tty.color?
 
-        system cache_env, *ruby_args, "--", RUBOCOP, *args
+        system cache_env, *ruby_args, "--", RUBOCOP, *args, chdir: base_dir
         $CHILD_STATUS.success?
       when :json
         result = system_command ruby_args.shift,
-                                args: [*ruby_args, "--", RUBOCOP, "--format", "json", *args],
-                                env:  cache_env
+                                args:  [*ruby_args, "--", RUBOCOP, "--format", "json", *args],
+                                env:   cache_env,
+                                chdir: base_dir
         json = json_result!(result)
-        json["files"]
+        json["files"].each do |file|
+          file["path"] = File.absolute_path(file["path"], base_dir)
+        end
       end
     end
 
